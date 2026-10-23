@@ -1,0 +1,73 @@
+## Shrink selection: strips the selection boundary inward by 1..N voxels.
+## Only voxels whose every ortho neighbor is still in the selection survive.
+@tool
+extends VoxlyEditOperation
+
+const MAX_STEPS := 64
+
+## Steps to shrink. Set by the menu before executing.
+var steps: int = 1
+
+## Registers the shrink operation in the registry.
+func _init() -> void:
+	id = "shrink_selection"
+	category = "selection"
+	display_name = "Shrink"
+	prompts_for_options = true
+
+## Returns whether the selection can shrink.
+func is_available(editor: VoxlyEditor) -> bool:
+	return editor != null and editor.selection != null and editor.selection.count() > 0
+
+## Count submenu entries 1..5 for the quick-count menu.
+func get_count_entries() -> Array[Dictionary]:
+	var entries: Array[Dictionary] = []
+	for count in range(1, 6):
+		entries.append({"label": str(count), "count": count})
+	return entries
+
+## Returns the option schema used by the ContextWindow's "Other..." prompt.
+func get_options() -> Array[Dictionary]:
+	return [
+		{
+			"label": "Steps",
+			"property": "steps",
+			"type": TYPE_INT,
+			"min": 1,
+			"max": MAX_STEPS,
+			"step": 1,
+			"default": 1,
+		},
+	]
+
+## Shrinks the selection by the given amount.
+func execute(editor: VoxlyEditor, undo_redo: EditorUndoRedoManager) -> void:
+	if editor.selection.count() == 0:
+		return
+	
+	var old_positions = editor.selection.to_array()
+	var current = editor.selection.to_array()
+	var step_count := clampi(steps, 1, MAX_STEPS)
+	
+	for _step in range(step_count):
+		var in_set: Dictionary[Vector3i, bool] = {}
+		for position in current:
+			in_set[position] = true
+		
+		var next: Array[Vector3i] = []
+		for position in current:
+			var keep := true
+			for direction in _neighbors():
+				if not in_set.has(position + direction):
+					keep = false
+					break
+			if keep:
+				next.append(position)
+		current = next
+		if current.is_empty():
+			break
+	
+	undo_redo.create_action("Voxly Shrink Selection")
+	undo_redo.add_do_method(editor.selection, "set_positions", current)
+	undo_redo.add_undo_method(editor.selection, "set_positions", old_positions)
+	undo_redo.commit_action()

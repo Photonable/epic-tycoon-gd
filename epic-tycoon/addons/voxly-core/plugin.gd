@@ -1,0 +1,301 @@
+## Voxly-Core editor plugin entry point.
+##
+## Registers the VoxlyDebug and VoxlyConfig autoload singletons, hooks the four
+## editor import plugins (model, set, mesh, mesh instance), and drives the
+## editor's state machine / input handler / bottom-panel UI manager through the
+## EditorPlugin lifecycle and editor signal callbacks.
+@tool
+extends EditorPlugin
+
+## Plugin name, shown in lifecycle banners.
+const NAME = "Voxly-Core"
+## Plugin version, shown in lifecycle banners.
+const VERSION = "1.0.0"
+
+## Node name of the debug logging singleton registered by this plugin.
+const AUTOLOAD_DEBUG := "VoxlyDebug"
+## Node name of the configuration singleton registered by this plugin.
+const AUTOLOAD_CONFIG := "VoxlyConfig"
+## Script registered as the [constant AUTOLOAD_DEBUG] singleton.
+const DEBUG_SCRIPT_PATH := "res://addons/voxly-core/utils/voxly_debug.gd"
+## Script registered as the [constant AUTOLOAD_CONFIG] singleton.
+const CONFIG_SCRIPT_PATH := "res://addons/voxly-core/utils/voxly_config.gd"
+
+## Script type of the debug singleton, used for typed autoload lookups.
+##
+## The script is preloaded by path instead of being reached through a global
+## class name or its autoload identifier, so this script stays parseable while
+## the autoloads do not exist yet.
+const VoxlyDebugUtility := preload("res://addons/voxly-core/utils/voxly_debug.gd")
+
+## Context label attached to every debug log emitted by the plugin.
+const _debug_context := NAME
+
+## Editor import plugins.
+var _voxel_model_3d_importer: EditorImportPlugin = null
+## Editor import plugin for VoxelSet resources.
+var _voxel_set_importer: EditorImportPlugin = null
+## Editor import plugin for Mesh resources.
+var _voxel_mesh_importer: EditorImportPlugin = null
+## Editor import plugin for MeshInstance3D scenes.
+var _voxel_mesh_instance_importer: EditorImportPlugin = null
+
+## State machine managing editor state transitions.
+var _state_machine: VoxlyStateMachine = null
+
+## Handles 3D viewport input routing.
+var _input_handler: VoxlyInputHandler = null
+
+## Manages bottom panel UI lifecycle.
+var _ui_manager: VoxlyUIManager = null
+
+## Contextual 3D toolbar menus for the currently edited object.
+var _toolbar: VoxlyToolbar = null
+
+## Current VoxelSet resource being edited.
+var _current_voxel_set: VoxelSet = null
+
+## Current VoxelNode3D node being viewed/edited.
+var _current_voxel_node_3d: VoxelNode3D = null
+
+## Registers singletons, import plugins, and editor signal handlers.
+func _enter_tree() -> void:
+	# Register the utility singletons before anything else.
+	_register_autoloads()
+	
+	# Always-print lifecycle banner.
+	var debug := _get_debug()
+	if debug:
+		if debug.is_enabled():
+			debug.log_always(_debug_context, "%s v%s loaded : debug logging is enabled." % [NAME, VERSION])
+		else:
+			debug.log_always(_debug_context, "%s v%s loaded : debug logging is disabled (call VoxlyDebug.enable() to turn it on)." % [NAME, VERSION])
+	
+	# Register import plugins.
+	_add_importers()
+	
+	# Initialize state management.
+	_state_machine = VoxlyStateMachine.new(self)
+	_input_handler = VoxlyInputHandler.new(_state_machine)
+	_ui_manager = VoxlyUIManager.new(self, _state_machine)
+	_toolbar = VoxlyToolbar.new(self, _state_machine, _ui_manager)
+	
+	# Connect to state machine changes.
+	_state_machine.state_changed.connect(_on_state_changed)
+	
+	# Connect Godot editor signals.
+	var editor_interface := get_editor_interface()
+	if editor_interface:
+		var editor_selection := editor_interface.get_selection()
+		editor_selection.selection_changed.connect(_on_selection_changed)
+	scene_closed.connect(_on_scene_closed)
+	main_screen_changed.connect(_on_main_screen_changed)
+
+## Cleans up docks, importers, and signals, then flushes persisted settings.
+func _exit_tree() -> void:
+	# Always-print lifecycle banner.
+	var debug := _get_debug()
+	if debug:
+		debug.log_always(_debug_context, "%s v%s unloaded successfully." % [NAME, VERSION])
+	
+	# Transition to IDLE first (closes docks, stops editing, cleans up controller).
+	if _state_machine and _state_machine.current_state != VoxlyState.State.IDLE:
+		# Disconnect signal temporarily to prevent double-handling.
+		if _state_machine.state_changed.is_connected(_on_state_changed):
+			_state_machine.state_changed.disconnect(_on_state_changed)
+		_state_machine.transition_to(VoxlyState.State.IDLE)
+		_state_machine = null
+	
+	# Disconnect remaining signals.
+	var editor_interface := get_editor_interface()
+	if editor_interface:
+		var editor_selection := editor_interface.get_selection()
+		if editor_selection and editor_selection.selection_changed.is_connected(_on_selection_changed):
+			editor_selection.selection_changed.disconnect(_on_selection_changed)
+	if scene_closed.is_connected(_on_scene_closed):
+		scene_closed.disconnect(_on_scene_closed)
+	if main_screen_changed.is_connected(_on_main_screen_changed):
+		main_screen_changed.disconnect(_on_main_screen_changed)
+	
+	# Clean up the toolbar and UI (VoxlyDebug is still available).
+	if _toolbar:
+		_toolbar.dispose()
+		_toolbar = null
+	if _ui_manager:
+		_ui_manager.dispose_all_docks()
+		_ui_manager = null
+	
+	# Remove import plugins.
+	_remove_importers()
+	
+	# Clear remaining references.
+	_current_voxel_node_3d = null
+	_input_handler = null
+	
+	# Flush the config cache while the singletons are still reachable.
+	_flush_config()
+
+## Registers the utility singletons when the plugin is enabled in the editor.
+func _enable_plugin() -> void:
+	_register_autoloads()
+
+## Unregisters the utility singletons when the plugin is disabled in the editor.
+## The config cache is flushed first, so no settings are lost while the
+## singletons are going away.
+func _disable_plugin() -> void:
+	_flush_config()
+	_unregister_autoloads()
+
+## Registers the utility singletons as project autoloads when they are missing.
+func _register_autoloads() -> void:
+	if not _is_singleton_registered(AUTOLOAD_DEBUG):
+		add_autoload_singleton(AUTOLOAD_DEBUG, DEBUG_SCRIPT_PATH)
+	
+	if not _is_singleton_registered(AUTOLOAD_CONFIG):
+		add_autoload_singleton(AUTOLOAD_CONFIG, CONFIG_SCRIPT_PATH)
+
+## Returns true if [param singleton_name] is registered as an enabled autoload.
+func _is_singleton_registered(singleton_name: String) -> bool:
+	var setting := "autoload/" + singleton_name
+	if not ProjectSettings.has_setting(setting):
+		return false
+	
+	var path: Variant = ProjectSettings.get_setting(setting)
+	return path is String and (path as String).begins_with("*")
+
+## Removes the utility singletons from the project autoloads.
+func _unregister_autoloads() -> void:
+	if ProjectSettings.has_setting("autoload/" + AUTOLOAD_CONFIG):
+		remove_autoload_singleton(AUTOLOAD_CONFIG)
+	
+	if ProjectSettings.has_setting("autoload/" + AUTOLOAD_DEBUG):
+		remove_autoload_singleton(AUTOLOAD_DEBUG)
+
+## Writes every cached config value to disk, if the config singleton is loaded.
+func _flush_config() -> void:
+	var config := _get_autoload_node(AUTOLOAD_CONFIG)
+	if config:
+		config.call("save_all")
+
+## Returns the debug singleton, or null if it is not registered.
+func _get_debug() -> VoxlyDebugUtility:
+	return _get_autoload_node(AUTOLOAD_DEBUG) as VoxlyDebugUtility
+
+## Returns the autoload node named [param singleton_name], or null if missing.
+## Find utility singelton through the scene tree instead of the global identifiers.
+func _get_autoload_node(singleton_name: String) -> Node:
+	return get_node_or_null("/root/" + singleton_name)
+
+## Registers all editor import plugins.
+func _add_importers() -> void:
+	# Register Voxly Model Importer (.vox, .png, .jpg to a PackedScene).
+	_voxel_model_3d_importer = preload("res://addons/voxly-core/importers/voxel_model_3d_import.gd").new()
+	add_import_plugin(_voxel_model_3d_importer)
+	
+	# Register Voxly Set Importer (.gpl, .aco, .json, .txt, .pal to a VoxelSet resource).
+	_voxel_set_importer = preload("res://addons/voxly-core/importers/voxel_set_import.gd").new()
+	add_import_plugin(_voxel_set_importer)
+	
+	# Register Voxly Mesh Importer (.vox, .png, .jpg to a Mesh resource).
+	_voxel_mesh_importer = preload("res://addons/voxly-core/importers/voxel_mesh_import.gd").new()
+	add_import_plugin(_voxel_mesh_importer)
+	
+	# Register Voxly MeshInstance Importer (.vox, .png, .jpg to a PackedScene with MeshInstance3D).
+	_voxel_mesh_instance_importer = preload("res://addons/voxly-core/importers/voxel_mesh_instance_import.gd").new()
+	add_import_plugin(_voxel_mesh_instance_importer)
+
+## Unregisters all editor import plugins.
+func _remove_importers() -> void:
+	if _voxel_model_3d_importer:
+		remove_import_plugin(_voxel_model_3d_importer)
+		_voxel_model_3d_importer = null
+	
+	if _voxel_set_importer:
+		remove_import_plugin(_voxel_set_importer)
+		_voxel_set_importer = null
+	
+	if _voxel_mesh_importer:
+		remove_import_plugin(_voxel_mesh_importer)
+		_voxel_mesh_importer = null
+	
+	if _voxel_mesh_instance_importer:
+		remove_import_plugin(_voxel_mesh_instance_importer)
+		_voxel_mesh_instance_importer = null
+
+## Reacts to state machine transitions, tracking the node/set under edit.
+func _on_state_changed(transition: VoxlyState.Transition) -> void:
+	match transition.to_state:
+		VoxlyState.State.VIEWING_VOXEL_SET:
+			pass
+		
+		VoxlyState.State.VIEWING_VOXEL_MODEL:
+			# Track the current VoxelNode3D.
+			_current_voxel_node_3d = transition.selected_node as VoxelNode3D
+			# Sync the node's VoxelSet to the state machine so UIManager can coordinate.
+			if _current_voxel_node_3d and _current_voxel_node_3d.voxel_set:
+				_state_machine.set_current_voxel_set(_current_voxel_node_3d.voxel_set)
+		
+		VoxlyState.State.EDITING_VOXEL_MODEL:
+			pass
+		
+		VoxlyState.State.IDLE:
+			_current_voxel_node_3d = null
+
+## Called by Godot to determine if this plugin can handle the given object.
+func _handles(object: Object) -> bool:
+	return _state_machine and _state_machine.can_handle(object)
+
+## Called by Godot to begin editing the given object.
+##
+## [param object] is null when the previously edited object is no longer handled
+## by this plugin, which lets the plugin reset its editing state.
+func _edit(object: Object) -> void:
+	if not _state_machine:
+		return
+	
+	# Filter only node types we handle.
+	if object is VoxelModel3D:
+		_state_machine.on_selection_changed([object])
+	elif object is VoxelSet:
+		# VoxelSet doesn't map to a selected node, store and transition.
+		_current_voxel_set = object
+		_state_machine.set_current_voxel_set(object)
+		_state_machine.transition_to(VoxlyState.State.VIEWING_VOXEL_SET, null)
+	
+	# Contextual toolbar menus follow whatever the editor is editing.
+	if _toolbar:
+		_toolbar.set_current_object(object)
+
+## Shows or hides the plugin's contextual toolbar menus.
+func _make_visible(visible: bool) -> void:
+	if _toolbar:
+		_toolbar.set_visible(visible)
+
+## Resets the editing state when the edited object is gone (freed or scene change).
+func _clear() -> void:
+	if _toolbar:
+		_toolbar.set_current_object(null)
+
+## Forwards 3D viewport input to the input handler.
+func _forward_3d_gui_input(camera: Camera3D, event: InputEvent) -> int:
+	return _input_handler and _input_handler.handle_input(camera, event)
+
+## Forwards editor selection changes to the state machine.
+func _on_selection_changed() -> void:
+	if not _state_machine:
+		return
+	
+	var selection := get_editor_interface().get_selection().get_selected_nodes()
+	_state_machine.on_selection_changed(selection)
+
+## Forwards main screen changes to the state machine and UI manager.
+func _on_main_screen_changed(screen_name: String) -> void:
+	if _state_machine:
+		_state_machine.on_main_screen_changed(screen_name)
+	if _ui_manager:
+		_ui_manager.on_main_screen_changed(screen_name)
+
+## Forwards scene-closed events to the state machine.
+func _on_scene_closed(filepath: String) -> void:
+	if _state_machine:
+		_state_machine.on_scene_closed(filepath)
