@@ -2,7 +2,7 @@
 
 [ext_resource type="Script" uid="uid://g4s7odc6mwby" path="res://Managers/SimulationManager.gd" id="1_ig7tw"]
 
-[node name="Main" type="Node2D" unique_id=290648842 node_paths=PackedStringArray("pause", "multi_01", "multi_02", "multi_03", "speed_label", "ticks_label")]
+[node name="Main" type="Node3D" unique_id=1314011001 node_paths=PackedStringArray("pause", "multi_01", "multi_02", "multi_03", "speed_label", "ticks_label")]
 script = ExtResource("1_ig7tw")
 pause = NodePath("CanvasLayer/Control/HBoxContainer/PauseButton")
 multi_01 = NodePath("CanvasLayer/Control/HBoxContainer/MultiButton01")
@@ -10,10 +10,6 @@ multi_02 = NodePath("CanvasLayer/Control/HBoxContainer/MultiButton02")
 multi_03 = NodePath("CanvasLayer/Control/HBoxContainer/MultiButton03")
 speed_label = NodePath("CanvasLayer/Control/HBoxContainer/GameSpeedLabel")
 ticks_label = NodePath("CanvasLayer/Control/HBoxContainer/GameTickCounter")
-
-[node name="Layers" type="Node2D" parent="." unique_id=1959028632]
-
-[node name="Sub01" type="TileMapLayer" parent="Layers" unique_id=1232440005]
 
 [node name="CanvasLayer" type="CanvasLayer" parent="." unique_id=659621058]
 
@@ -66,7 +62,6 @@ layout_mode = 2
 text = "0"
 
 [connection signal="pressed" from="CanvasLayer/Control/HBoxContainer/PauseButton" to="." method="_on_pause_button_pressed"]
-[connection signal="toggled" from="CanvasLayer/Control/HBoxContainer/PauseButton" to="." method="_on_pause_button_toggled"]
 [connection signal="pressed" from="CanvasLayer/Control/HBoxContainer/MultiButton01" to="." method="_on_multi_button_01_pressed"]
 [connection signal="pressed" from="CanvasLayer/Control/HBoxContainer/MultiButton02" to="." method="_on_multi_button_02_pressed"]
 [connection signal="pressed" from="CanvasLayer/Control/HBoxContainer/MultiButton03" to="." method="_on_multi_button_03_pressed"]
